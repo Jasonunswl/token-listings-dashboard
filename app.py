@@ -1,5 +1,5 @@
 import time
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone, timedelta, date
 
 import pandas as pd
 import requests
@@ -124,10 +124,11 @@ def load_all():
     df = pd.DataFrame(rows)
     if not df.empty:
         df = df.drop_duplicates(subset=["exchange", "pair", "category"])
-        df["listed"] = df["list_ts"].apply(
-            lambda t: datetime.fromtimestamp(t / 1000, tz=timezone.utc).strftime("%Y-%m-%d")
-            if pd.notna(t) and t else ""
+        df["listed_date"] = df["list_ts"].apply(
+            lambda t: datetime.fromtimestamp(t / 1000, tz=timezone.utc).date()
+            if pd.notna(t) and t else None
         )
+        df["listed"] = df["listed_date"].apply(lambda d: d.strftime("%Y-%m-%d") if d else "")
     return df, errors
 
 
@@ -135,7 +136,8 @@ def load_all():
 st.title("🪙 Token Listings Dashboard")
 st.caption(
     "Trading pairs across six exchanges, with quote currency and category (Spot / "
-    "Perpetual). OKX shows real listing dates; filter by exchange, category, quote or token."
+    "Perpetual). OKX shows real listing dates; filter by exchange, category, quote, "
+    "token or listing date."
 )
 
 top = st.columns([1, 5])
@@ -161,19 +163,36 @@ for col, name in zip(tiles, FETCHERS):
 
 st.divider()
 
-# Filters
+# Filters row 1
 f1, f2, f3, f4 = st.columns([1.2, 1, 1, 1.5])
 with f1:
     ex_sel = st.multiselect("Exchange", sorted(df["exchange"].unique()))
 with f2:
     cat_sel = st.multiselect("Category", sorted(df["category"].unique()))
 with f3:
-    quotes = sorted(df["quote"].unique())
-    q_default = ["AUD"] if "AUD" in quotes else []
-    quote_sel = st.multiselect("Quote", quotes)
+    quote_sel = st.multiselect("Quote", sorted(df["quote"].unique()))
 with f4:
     token_q = st.text_input("Search token", placeholder="e.g. BTC, TAO").strip().upper()
 
+# Filters row 2 - date
+dated = df["listed_date"].dropna()
+min_d = dated.min() if not dated.empty else date(2020, 1, 1)
+max_d = dated.max() if not dated.empty else date.today()
+
+d1, d2, d3 = st.columns([1.2, 1.2, 2])
+with d1:
+    start_d = st.date_input("Listed from", value=None, min_value=min_d, max_value=max_d)
+with d2:
+    end_d = st.date_input("Listed to", value=None, min_value=min_d, max_value=max_d)
+with d3:
+    st.write("")
+    st.write("")
+    keep_undated = st.checkbox(
+        "Include pairs without a listing date", value=True,
+        help="Only OKX exposes real listing dates. Uncheck to show dated pairs only.",
+    )
+
+# Apply filters
 view = df.copy()
 if ex_sel:
     view = view[view["exchange"].isin(ex_sel)]
@@ -183,6 +202,20 @@ if quote_sel:
     view = view[view["quote"].isin(quote_sel)]
 if token_q:
     view = view[view["token"].str.contains(token_q, na=False)]
+
+date_active = bool(start_d or end_d)
+if date_active:
+    has_date = view["listed_date"].notna()
+    cond = has_date.copy()
+    if start_d:
+        cond &= view["listed_date"].apply(lambda d: d is not None and d >= start_d)
+    if end_d:
+        cond &= view["listed_date"].apply(lambda d: d is not None and d <= end_d)
+    if keep_undated:
+        cond |= ~has_date
+    view = view[cond]
+elif not keep_undated:
+    view = view[view["listed_date"].notna()]
 
 st.write(f"**{len(view):,} pairs** shown (of {len(df):,} total)")
 
@@ -200,5 +233,6 @@ st.dataframe(
 st.caption(
     f"Last updated {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} · cached 120s · "
     "AUD pairs come mainly from CoinSpot & Swyftx. Perpetuals from OKX & KuCoin futures. "
+    "Only OKX exposes listing dates, so the date filter mainly affects OKX pairs. "
     "'Convert' is an instant-swap feature without public listed pairs, so it's not shown."
 )
