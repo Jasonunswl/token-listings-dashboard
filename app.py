@@ -1,150 +1,204 @@
 import time
 from datetime import datetime, timezone, timedelta
 
+import pandas as pd
 import requests
 import streamlit as st
 
 st.set_page_config(page_title="New Token Listings", page_icon="🪙", layout="wide")
 
-# Exchanges tracked across the dashboard.
-EXCHANGES = ["Coinbase", "Kraken", "OKX (Global)", "KuCoin", "CoinSpot (AU)", "Swyftx (AU)"]
-
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (compatible; ListingsDashboard/1.0)",
     "Accept": "application/json",
 }
-RECENT_DAYS = 30  # window for surfacing recent listings where real dates exist
 
 
 def _get(url):
-    return requests.get(url, headers=HEADERS, timeout=15).json()
+    return requests.get(url, headers=HEADERS, timeout=20).json()
 
 
+# Each fetcher returns a list of pair dicts:
+# {exchange, token, quote, pair, category, list_ts}
 def fetch_coinbase():
     data = _get("https://api.exchange.coinbase.com/products")
-    return [{"symbol": p["base_currency"], "list_ts": None}
-            for p in data if p.get("status") == "online"]
+    out = []
+    for p in data:
+        if p.get("status") != "online":
+            continue
+        base, quote = p.get("base_currency"), p.get("quote_currency")
+        if base and quote:
+            out.append(_row("Coinbase", base, quote, "Spot", None))
+    return out
 
 
 def fetch_kraken():
     data = _get("https://api.kraken.com/0/public/AssetPairs").get("result", {})
     out = []
     for p in data.values():
-        base = (p.get("base") or "").lstrip("XZ") or p.get("base")
-        if base:
-            out.append({"symbol": base, "list_ts": None})
+        ws = p.get("wsname") or ""
+        if "/" in ws:
+            base, quote = ws.split("/", 1)
+            out.append(_row("Kraken", base, quote, "Spot", None))
     return out
 
 
 def fetch_okx():
-    data = _get("https://www.okx.com/api/v5/public/instruments?instType=SPOT").get("data", [])
     out = []
-    for x in data:
-        if x.get("state") == "live":
+    spot = _get("https://www.okx.com/api/v5/public/instruments?instType=SPOT").get("data", [])
+    for x in spot:
+        if x.get("state") == "live" and x.get("baseCcy") and x.get("quoteCcy"):
             ts = int(x["listTime"]) if x.get("listTime") else None
-            out.append({"symbol": x.get("baseCcy") or x.get("instId"), "list_ts": ts})
+            out.append(_row("OKX", x["baseCcy"], x["quoteCcy"], "Spot", ts))
+    swap = _get("https://www.okx.com/api/v5/public/instruments?instType=SWAP").get("data", [])
+    for x in swap:
+        if x.get("state") != "live":
+            continue
+        parts = (x.get("instId") or "").split("-")  # e.g. BTC-USD-SWAP
+        if len(parts) >= 2:
+            ts = int(x["listTime"]) if x.get("listTime") else None
+            out.append(_row("OKX", parts[0], parts[1], "Perpetual", ts))
     return out
 
 
 def fetch_kucoin():
-    data = _get("https://api.kucoin.com/api/v1/symbols").get("data", [])
-    return [{"symbol": x.get("baseCurrency") or x["symbol"], "list_ts": None}
-            for x in data if x.get("enableTrading")]
+    out = []
+    spot = _get("https://api.kucoin.com/api/v1/symbols").get("data", [])
+    for x in spot:
+        if x.get("enableTrading") and x.get("baseCurrency") and x.get("quoteCurrency"):
+            out.append(_row("KuCoin", x["baseCurrency"], x["quoteCurrency"], "Spot", None))
+    fut = _get("https://api-futures.kucoin.com/api/v1/contracts/active").get("data", [])
+    for x in fut:
+        if x.get("status") == "Open" and x.get("baseCurrency") and x.get("quoteCurrency"):
+            base = "BTC" if x["baseCurrency"] == "XBT" else x["baseCurrency"]
+            out.append(_row("KuCoin", base, x["quoteCurrency"], "Perpetual", None))
+    return out
 
 
 def fetch_coinspot():
     prices = _get("https://www.coinspot.com.au/pubapi/v2/latest").get("prices", {})
-    return [{"symbol": s.upper(), "list_ts": None} for s in prices.keys()]
+    return [_row("CoinSpot", s.upper(), "AUD", "Spot", None) for s in prices.keys()]
 
 
 def fetch_swyftx():
     data = _get("https://api.swyftx.com.au/markets/assets/")
     if isinstance(data, dict):
         data = data.get("data", [])
-    return [{"symbol": a.get("code"), "list_ts": None}
-            for a in data if a.get("tradable") and a.get("code")]
+    out = []
+    for a in data:
+        code = a.get("code")
+        if a.get("tradable") and code and code != "AUD":
+            out.append(_row("Swyftx", code, "AUD", "Spot", None))
+    return out
+
+
+def _row(exchange, token, quote, category, list_ts):
+    token, quote = str(token).upper(), str(quote).upper()
+    return {
+        "exchange": exchange,
+        "token": token,
+        "quote": quote,
+        "pair": f"{token}/{quote}",
+        "category": category,
+        "list_ts": list_ts,
+    }
 
 
 FETCHERS = {
     "Coinbase": fetch_coinbase,
     "Kraken": fetch_kraken,
-    "OKX (Global)": fetch_okx,
+    "OKX": fetch_okx,
     "KuCoin": fetch_kucoin,
-    "CoinSpot (AU)": fetch_coinspot,
-    "Swyftx (AU)": fetch_swyftx,
+    "CoinSpot": fetch_coinspot,
+    "Swyftx": fetch_swyftx,
 }
 
 
-@st.cache_data(ttl=120, show_spinner=False)
-def load_exchange(name):
-    try:
-        items = FETCHERS[name]()
-        merged = {}
-        for it in items:
-            sym = str(it["symbol"]).upper()
-            ts = it["list_ts"]
-            if sym not in merged or (ts and (merged[sym] is None or ts < merged[sym])):
-                merged[sym] = ts
-        return merged, None
-    except Exception as e:
-        return {}, str(e)
+@st.cache_data(ttl=120, show_spinner=True)
+def load_all():
+    rows, errors = [], {}
+    for name, fn in FETCHERS.items():
+        try:
+            rows.extend(fn())
+        except Exception as e:
+            errors[name] = str(e)
+    df = pd.DataFrame(rows)
+    if not df.empty:
+        df = df.drop_duplicates(subset=["exchange", "pair", "category"])
+        df["listed"] = df["list_ts"].apply(
+            lambda t: datetime.fromtimestamp(t / 1000, tz=timezone.utc).strftime("%Y-%m-%d")
+            if pd.notna(t) and t else ""
+        )
+    return df, errors
 
 
-def recent_listings(symbols_map):
-    cutoff = (datetime.now(timezone.utc) - timedelta(days=RECENT_DAYS)).timestamp() * 1000
-    recent = [(s, ts) for s, ts in symbols_map.items() if ts and ts >= cutoff]
-    recent.sort(key=lambda x: x[1], reverse=True)
-    return recent
-
-
-st.title("🪙 New Token Listings Dashboard")
+# ---------------- UI ----------------
+st.title("🪙 Token Listings Dashboard")
 st.caption(
-    "Tracks tradable assets across six exchanges. Exchanges that expose real listing "
-    "dates (OKX) show genuinely recent listings; others show total tracked assets and "
-    "flag changes across your session refreshes."
+    "Trading pairs across six exchanges, with quote currency and category (Spot / "
+    "Perpetual). OKX shows real listing dates; filter by exchange, category, quote or token."
 )
 
-if st.button("🔄 Refresh"):
-    st.cache_data.clear()
-    st.rerun()
+top = st.columns([1, 5])
+with top[0]:
+    if st.button("🔄 Refresh", use_container_width=True):
+        st.cache_data.clear()
+        st.rerun()
 
-if "snapshots" not in st.session_state:
-    st.session_state.snapshots = {}
+df, errors = load_all()
 
-st.write("")
-cols = st.columns(3)
+if errors:
+    st.warning("Some sources failed: " + ", ".join(f"{k} ({v[:60]})" for k, v in errors.items()))
 
-for i, name in enumerate(EXCHANGES):
-    symbols_map, err = load_exchange(name)
-    prev = st.session_state.snapshots.get(name)
+if df.empty:
+    st.error("No data loaded.")
+    st.stop()
 
-    new_since_last = []
-    if prev is not None:
-        new_since_last = sorted(set(symbols_map) - set(prev))
-    st.session_state.snapshots[name] = set(symbols_map)
-
-    recent = recent_listings(symbols_map)
-
-    with cols[i % 3]:
-        with st.container(border=True):
-            st.subheader(name)
-            if err:
-                st.error(f"Fetch failed: {err}")
-                continue
-            st.metric("Assets tracked", len(symbols_map))
-
-            if new_since_last:
-                st.success(f"🆕 {len(new_since_last)} new since last refresh")
-                st.write(", ".join(new_since_last[:40]))
-            elif recent:
-                st.write(f"**Recently listed (last {RECENT_DAYS}d):**")
-                for sym, ts in recent[:15]:
-                    d = datetime.fromtimestamp(ts / 1000, tz=timezone.utc).strftime("%Y-%m-%d")
-                    st.write(f"• **{sym}** — {d}")
-            else:
-                st.caption("No new listings detected yet. Baseline saved; "
-                           "new coins appear on future refreshes.")
+# Summary tiles
+counts = df.groupby("exchange")["pair"].count().to_dict()
+tiles = st.columns(len(FETCHERS))
+for col, name in zip(tiles, FETCHERS):
+    col.metric(name, counts.get(name, 0))
 
 st.divider()
-st.caption(f"Last updated {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} · "
-           "Data cached 120s. CoinSpot's public API exposes a limited set of coins.")
+
+# Filters
+f1, f2, f3, f4 = st.columns([1.2, 1, 1, 1.5])
+with f1:
+    ex_sel = st.multiselect("Exchange", sorted(df["exchange"].unique()))
+with f2:
+    cat_sel = st.multiselect("Category", sorted(df["category"].unique()))
+with f3:
+    quotes = sorted(df["quote"].unique())
+    q_default = ["AUD"] if "AUD" in quotes else []
+    quote_sel = st.multiselect("Quote", quotes)
+with f4:
+    token_q = st.text_input("Search token", placeholder="e.g. BTC, TAO").strip().upper()
+
+view = df.copy()
+if ex_sel:
+    view = view[view["exchange"].isin(ex_sel)]
+if cat_sel:
+    view = view[view["category"].isin(cat_sel)]
+if quote_sel:
+    view = view[view["quote"].isin(quote_sel)]
+if token_q:
+    view = view[view["token"].str.contains(token_q, na=False)]
+
+st.write(f"**{len(view):,} pairs** shown (of {len(df):,} total)")
+
+view = view.sort_values(["listed", "exchange", "pair"], ascending=[False, True, True])
+st.dataframe(
+    view[["token", "pair", "exchange", "quote", "category", "listed"]].rename(
+        columns={"token": "Token", "pair": "Pair", "exchange": "Exchange",
+                 "quote": "Quote", "category": "Category", "listed": "Listed"}
+    ),
+    use_container_width=True,
+    hide_index=True,
+    height=560,
+)
+
+st.caption(
+    f"Last updated {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} · cached 120s · "
+    "AUD pairs come mainly from CoinSpot & Swyftx. Perpetuals from OKX & KuCoin futures. "
+    "'Convert' is an instant-swap feature without public listed pairs, so it's not shown."
+)
