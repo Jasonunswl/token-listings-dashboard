@@ -27,6 +27,23 @@ def _get(url):
     return requests.get(url, headers=HEADERS, timeout=20).json()
 
 
+def _as_date(v):
+    """Coerce a date / datetime / pandas Timestamp to a plain date, else None."""
+    if v is None:
+        return None
+    if isinstance(v, datetime):
+        return v.date()
+    if isinstance(v, date):
+        return v
+    try:
+        ts = pd.Timestamp(v)
+        if pd.isna(ts):
+            return None
+        return ts.date()
+    except Exception:
+        return None
+
+
 def fetch_coinbase():
     data = _get("https://api.exchange.coinbase.com/products")
     out = []
@@ -122,7 +139,7 @@ def load_all():
     if not df.empty:
         df = df.drop_duplicates(subset=["exchange", "pair", "category"])
         df["listed_date"] = df["list_ts"].apply(
-            lambda t: datetime.fromtimestamp(t / 1000, tz=timezone.utc).date()
+            lambda t: _as_date(datetime.fromtimestamp(t / 1000, tz=timezone.utc))
             if pd.notna(t) and t else None
         )
     return df, errors
@@ -143,10 +160,10 @@ def record_snapshot(df):
 def new_in_window(df, seen, start_d, end_d):
     result = {}
     for _, r in df.iterrows():
-        ld = r["listed_date"]
+        ld = _as_date(r["listed_date"])
         if ld is None:
-            ld = seen.get((r["exchange"], r["pair"], r["category"]))
-        if ld and start_d <= ld <= end_d:
+            ld = _as_date(seen.get((r["exchange"], r["pair"], r["category"])))
+        if ld is not None and start_d <= ld <= end_d:
             result.setdefault((r["exchange"], r["category"]), []).append(r["pair"])
     return result
 
@@ -174,8 +191,8 @@ with c3:
         st.cache_data.clear()
         st.rerun()
 
-if isinstance(start_d, tuple):
-    start_d = start_d[0]
+start_d = _as_date(start_d[0] if isinstance(start_d, tuple) else start_d)
+end_d = _as_date(end_d[0] if isinstance(end_d, tuple) else end_d)
 
 win = new_in_window(df, seen, start_d, end_d)
 
