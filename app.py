@@ -8,7 +8,7 @@ import pandas as pd
 import requests
 import streamlit as st
 
-st.set_page_config(page_title="New Token Listings", page_icon=":coin:", layout="wide")
+st.set_page_config(page_title="New Token Listings", page_icon="💰", layout="wide")
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (compatible; ListingsDashboard/1.0)",
@@ -296,7 +296,7 @@ def new_in_window(df, seen, start_d, end_d):
 
 
 def build_dashboard():
-    st.title(":coin: Token Listings Dashboard")
+    st.title("💰 Token Listings Dashboard")
 
     df, errors = load_all()
     if errors:
@@ -314,7 +314,7 @@ def build_dashboard():
         end_d = st.date_input("To", value=date.today(), key="to_d")
     with c3:
         st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
-        if st.button(":arrows_counterclockwise: Refresh", key="refresh_btn"):
+        if st.button("Refresh", key="refresh_btn"):
             st.cache_data.clear()
             st.rerun()
 
