@@ -1,11 +1,13 @@
 import html
+import json
+import base64
 from datetime import datetime, timezone, timedelta, date
 
 import pandas as pd
 import requests
 import streamlit as st
 
-st.set_page_config(page_title="New Token Listings", page_icon="🪙", layout="wide")
+st.set_page_config(page_title="New Token Listings", page_icon="\u{1FA99}", layout="wide")
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (compatible; ListingsDashboard/1.0)",
@@ -22,6 +24,78 @@ EXCHANGE_DISPLAY = {
 }
 TYPE_COLOR = {"Convert": "#9c27b0", "Spot": "#4caf50", "Perp": "#e08a2e"}
 BASELINE_DATE = date(2000, 1, 1)
+
+# ---- Persistent storage config (GitHub-backed) ----
+# Set these in Streamlit secrets to enable durable, cross-restart new-listing
+# detection for all exchanges. If GITHUB_TOKEN is absent the app silently
+# falls back to session-only tracking (baseline resets on restart).
+SNAPSHOT_REPO = "Jasonunswl/token-listings-dashboard"
+SNAPSHOT_PATH = "snapshot.json"
+SNAPSHOT_BRANCH = "main"
+
+
+def _gh_token():
+    try:
+        return st.secrets.get("GITHUB_TOKEN")
+    except Exception:
+        return None
+
+
+def _gh_headers(token):
+    return {
+        "Authorization": f"token {token}",
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "ListingsDashboard",
+    }
+
+
+def load_persistent_snapshot():
+    """Return (seen_dict, sha) from snapshot.json in the repo, or ({}, None)."""
+    token = _gh_token()
+    if not token:
+        return None, None
+    url = f"https://api.github.com/repos/{SNAPSHOT_REPO}/contents/{SNAPSHOT_PATH}?ref={SNAPSHOT_BRANCH}"
+    try:
+        r = requests.get(url, headers=_gh_headers(token), timeout=20)
+        if r.status_code == 404:
+            return {}, None
+        r.raise_for_status()
+        payload = r.json()
+        raw = base64.b64decode(payload["content"]).decode("utf-8")
+        data = json.loads(raw) if raw.strip() else {}
+        seen = {}
+        for k, v in data.items():
+            parts = k.split("|")
+            if len(parts) == 3:
+                seen[(parts[0], parts[1], parts[2])] = _as_date(v)
+        return seen, payload.get("sha")
+    except Exception:
+        return None, None
+
+
+def save_persistent_snapshot(seen, sha):
+    token = _gh_token()
+    if not token:
+        return False
+    data = {}
+    for (ex, pair, cat), d in seen.items():
+        if d is not None:
+            data[f"{ex}|{pair}|{cat}"] = d.strftime("%Y-%m-%d")
+    body = base64.b64encode(json.dumps(data, indent=0, sort_keys=True).encode("utf-8")).decode("ascii")
+    url = f"https://api.github.com/repos/{SNAPSHOT_REPO}/contents/{SNAPSHOT_PATH}"
+    payload = {
+        "message": f"Update listing snapshot {date.today().isoformat()}",
+        "content": body,
+        "branch": SNAPSHOT_BRANCH,
+    }
+    if sha:
+        payload["sha"] = sha
+    try:
+        r = requests.put(url, headers=_gh_headers(token), json=payload, timeout=20)
+        r.raise_for_status()
+        return True
+    except Exception:
+        return False
 
 
 def _get(url):
@@ -146,6 +220,30 @@ def load_all():
 
 
 def record_snapshot(df):
+    """Persistent-first tracking with session fallback.
+
+    Returns (seen, persistent) where persistent indicates durable storage
+    is active. When persistent, new pairs are stamped with today's date and
+    written back to the repo so detection survives app restarts.
+    """
+    persistent_seen, sha = load_persistent_snapshot()
+
+    if persistent_seen is not None:
+        # Durable mode via GitHub snapshot.json
+        seen = dict(persistent_seen)
+        first_run = len(seen) == 0
+        stamp = BASELINE_DATE if first_run else date.today()
+        changed = False
+        for _, r in df.iterrows():
+            key = (r["exchange"], r["pair"], r["category"])
+            if key not in seen:
+                seen[key] = stamp
+                changed = True
+        if changed:
+            save_persistent_snapshot(seen, sha)
+        return seen, True
+
+    # Session-only fallback (resets on restart)
     first_run = "first_seen" not in st.session_state
     if first_run:
         st.session_state.first_seen = {}
@@ -155,7 +253,7 @@ def record_snapshot(df):
         key = (r["exchange"], r["pair"], r["category"])
         if key not in seen:
             seen[key] = stamp
-    return seen
+    return seen, False
 
 
 def new_in_window(df, seen, start_d, end_d):
@@ -170,7 +268,7 @@ def new_in_window(df, seen, start_d, end_d):
 
 
 def build_dashboard():
-    st.title("🪙 Token Listings Dashboard")
+    st.title("\u{1FA99} Token Listings Dashboard")
 
     df, errors = load_all()
     if errors:
@@ -179,7 +277,7 @@ def build_dashboard():
         st.error("No data loaded.")
         st.stop()
 
-    seen = record_snapshot(df)
+    seen, persistent = record_snapshot(df)
 
     c1, c2, c3 = st.columns([1.3, 1.3, 1])
     with c1:
@@ -188,7 +286,7 @@ def build_dashboard():
         end_d = st.date_input("To", value=date.today(), key="to_d")
     with c3:
         st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
-        if st.button("🔄 Refresh", key="refresh_btn"):
+        if st.button("\u{1F504} Refresh", key="refresh_btn"):
             st.cache_data.clear()
             st.rerun()
 
@@ -232,12 +330,22 @@ def build_dashboard():
     )
     st.markdown(table_html, unsafe_allow_html=True)
 
-    st.caption(
-        "New listings within the selected window. OKX shows real listing dates immediately; "
-        "the other exchanges show '-' until genuinely new pairs appear after first load "
-        "(baseline set on first run, resets if the app restarts). 'Convert' has no public "
-        "listed pairs. Perpetuals are available on OKX & KuCoin only."
-    )
+    if persistent:
+        st.caption(
+            "\u2705 Persistent tracking active. New listings are recorded durably "
+            "and survive app restarts. OKX shows real listing dates immediately; "
+            "the other exchanges are flagged as new the first date a genuinely new "
+            "pair appears after the baseline. 'Convert' has no public listed pairs. "
+            "Perpetuals are available on OKX & KuCoin only."
+        )
+    else:
+        st.caption(
+            "New listings within the selected window. OKX shows real listing dates "
+            "immediately; the other exchanges show '-' until genuinely new pairs "
+            "appear after first load (baseline set on first run, resets if the app "
+            "restarts \u2014 add a GITHUB_TOKEN secret to enable persistent tracking). "
+            "'Convert' has no public listed pairs. Perpetuals are available on OKX & KuCoin only."
+        )
 
     with st.expander("Browse all pairs (full filterable table)"):
         st.dataframe(
