@@ -133,6 +133,10 @@ def _to_ms(v):
     return n
 
 
+def _date_to_ms(d):
+    return int(d.replace(tzinfo=timezone.utc).timestamp() * 1000)
+
+
 def fetch_coinspot():
     prices = _get("https://www.coinspot.com.au/pubapi/v2/latest").get("prices", {})
     return [_row("CoinSpot", s.upper(), "AUD", "Spot", None) for s in prices.keys()]
@@ -159,14 +163,60 @@ def fetch_coinbase():
     return out
 
 
+def _parse_written_date(txt):
+    txt = re.sub(r"(\d{1,2})(st|nd|rd|th)", r"\1", txt).strip().rstrip(",")
+    for fmt in ("%B %d %Y", "%B %d, %Y"):
+        try:
+            return datetime.strptime(txt.replace(",", ""), "%B %d %Y")
+        except ValueError:
+            continue
+    return None
+
+
 def fetch_kraken():
-    data = _get("https://api.kraken.com/0/public/AssetPairs").get("result", {})
+    """Kraken listings with real dates from the Asset Listings announcements,
+    merged with the full trading catalogue (catalogue rows have no date and are
+    used mainly for the browse-all table / snapshot detection)."""
     out = []
-    for p in data.values():
-        ws = p.get("wsname") or ""
-        if "/" in ws:
-            base, quote = ws.split("/", 1)
-            out.append(_row("Kraken", base, quote, "Spot", None))
+    seen_pairs = set()
+
+    # 1) Dated announcements: "TOKEN is available for trading!" + published date.
+    try:
+        resp = requests.get(
+            "https://blog.kraken.com/category/product/asset-listings",
+            headers=HTML_HEADERS, timeout=20,
+        )
+        text = re.sub(r"<[^>]+>", " ", resp.text)
+        text = html.unescape(text)
+        pat = re.compile(
+            r"([A-Z0-9]{2,10})\s+is\s+available\s+for\s+trading.*?"
+            r"((?:January|February|March|April|May|June|July|August|September|"
+            r"October|November|December)\s+\d{1,2}(?:st|nd|rd|th)?,?\s+\d{4})",
+            re.I | re.S,
+        )
+        for tok, dtxt in pat.findall(text):
+            tok = tok.upper()
+            if tok in seen_pairs:
+                continue
+            d = _parse_written_date(dtxt)
+            ms = _date_to_ms(d) if d else None
+            out.append(_row("Kraken", tok, "USD", "Spot", ms))
+            seen_pairs.add(tok)
+    except Exception:
+        pass
+
+    # 2) Full catalogue (no dates) for completeness in the browse table.
+    try:
+        data = _get("https://api.kraken.com/0/public/AssetPairs").get("result", {})
+        for p in data.values():
+            ws = p.get("wsname") or ""
+            if "/" in ws:
+                base, quote = ws.split("/", 1)
+                if base.upper() in seen_pairs:
+                    continue
+                out.append(_row("Kraken", base, quote, "Spot", None))
+    except Exception:
+        pass
     return out
 
 
@@ -210,7 +260,7 @@ def fetch_okx():
                 continue
             try:
                 d = datetime.strptime(dtxt.strip(), "%d %B %Y")
-                ms = int(d.replace(tzinfo=timezone.utc).timestamp() * 1000)
+                ms = _date_to_ms(d)
             except ValueError:
                 ms = None
             out.append(_row("OKX", base, quote, cat, ms))
@@ -360,23 +410,25 @@ def build_dashboard():
 
     st.info(
         "Sources: OKX AU rows come from the OKX Australia new-listings announcements "
-        "(okx.com/en-au). KuCoin does not operate a separate Australian site, so KuCoin AU "
-        "shows '-' (no AU-specific source is available). CoinSpot and Swyftx are Australian "
-        "exchanges (AUD). Coinbase and Kraken are global spot catalogues."
+        "(okx.com/en-au). Kraken rows use real dates from Kraken's Asset Listings "
+        "announcements (blog.kraken.com). KuCoin has no separate Australian site, so "
+        "KuCoin AU shows '-'. CoinSpot and Swyftx are Australian exchanges (AUD). "
+        "Coinbase publishes no dated listing feed, so its new pairs are detected by "
+        "day-over-day snapshot."
     )
 
     if persistent:
         st.caption(
-            "Persistent tracking active. OKX AU shows real listing dates parsed from "
-            "its announcements; Coinbase, Kraken, CoinSpot and Swyftx do not publish listing "
+            "Persistent tracking active. OKX AU and Kraken show real listing dates parsed "
+            "from their announcements; Coinbase, CoinSpot and Swyftx do not publish listing "
             "dates, so a pair is flagged the first date it appears after the baseline. "
             "'Convert' has no public listed pairs."
         )
     else:
         st.caption(
-            "New listings within the selected window. OKX AU shows real listing dates from "
-            "announcements; the other exchanges show '-' until genuinely new pairs appear "
-            "after first load (resets on restart - add a GITHUB_TOKEN secret for "
+            "New listings within the selected window. OKX AU and Kraken show real listing "
+            "dates from announcements; the other exchanges show '-' until genuinely new pairs "
+            "appear after first load (resets on restart - add a GITHUB_TOKEN secret for "
             "persistent tracking). 'Convert' has no public listed pairs."
         )
 
