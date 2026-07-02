@@ -1,6 +1,7 @@
 import html
 import json
 import base64
+import re
 from datetime import datetime, timezone, timedelta, date
 
 import pandas as pd
@@ -13,22 +14,25 @@ HEADERS = {
     "User-Agent": "Mozilla/5.0 (compatible; ListingsDashboard/1.0)",
     "Accept": "application/json",
 }
+HTML_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                  "(KHTML, like Gecko) Chrome/120.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml",
+    "Accept-Language": "en-AU,en;q=0.9",
+}
 
 EXCHANGE_DISPLAY = {
     "CoinSpot": "CoinSpot",
     "Swyftx": "Swyftx",
     "Coinbase": "Coinbase",
     "Kraken": "Kraken",
-    "OKX": "OKX (Global)",
+    "OKX": "OKX Australia",
     "KuCoin": "KuCoin (Global)",
 }
 TYPE_COLOR = {"Convert": "#9c27b0", "Spot": "#4caf50", "Perp": "#e08a2e"}
 BASELINE_DATE = date(2000, 1, 1)
+ANN_PAGES = 4
 
-# ---- Persistent storage config (GitHub-backed) ----
-# Set these in Streamlit secrets to enable durable, cross-restart new-listing
-# detection for all exchanges. If GITHUB_TOKEN is absent the app silently
-# falls back to session-only tracking (baseline resets on restart).
 SNAPSHOT_REPO = "Jasonunswl/token-listings-dashboard"
 SNAPSHOT_PATH = "snapshot.json"
 SNAPSHOT_BRANCH = "main"
@@ -50,7 +54,6 @@ def _gh_headers(token):
 
 
 def load_persistent_snapshot():
-    """Return (seen_dict, sha) from snapshot.json in the repo, or ({}, None)."""
     token = _gh_token()
     if not token:
         return None, None
@@ -119,17 +122,32 @@ def _as_date(v):
 
 
 def _to_ms(v):
-    """Coerce an epoch value to milliseconds, or None. Handles s / ms."""
     try:
         n = int(v)
     except (TypeError, ValueError):
         return None
     if n <= 0:
         return None
-    # Values below ~1e12 are seconds; scale to ms.
     if n < 1_000_000_000_000:
         n *= 1000
     return n
+
+
+def fetch_coinspot():
+    prices = _get("https://www.coinspot.com.au/pubapi/v2/latest").get("prices", {})
+    return [_row("CoinSpot", s.upper(), "AUD", "Spot", None) for s in prices.keys()]
+
+
+def fetch_swyftx():
+    data = _get("https://api.swyftx.com.au/markets/assets/")
+    if isinstance(data, dict):
+        data = data.get("data", [])
+    out = []
+    for a in data:
+        code = a.get("code")
+        if a.get("tradable") and code and code != "AUD":
+            out.append(_row("Swyftx", code, "AUD", "Spot", None))
+    return out
 
 
 def fetch_coinbase():
@@ -152,51 +170,85 @@ def fetch_kraken():
     return out
 
 
+def _okx_parse_title(title):
+    t = title
+    is_perp = bool(re.search(r"perp|x-perp|perpetual|futures", t, re.I))
+    m = re.search(r"([A-Z0-9]{2,15})\s*/\s*([A-Z0-9]{2,6})", t)
+    if m:
+        quote = m.group(2)
+        if quote.startswith("USD") and quote not in ("USDT", "USDC"):
+            quote = "USD"
+        return m.group(1), quote, ("Perp" if is_perp else "Spot")
+    m = re.search(r"\b([A-Z0-9]{2,12}?)(USDT|USDC|USD|EUR|BTC|ETH)\b", t)
+    if m:
+        return m.group(1), m.group(2), ("Perp" if is_perp else "Spot")
+    m = re.search(r"for\s+([A-Z0-9]{2,12})\s+crypto", t)
+    if m:
+        return m.group(1), "USDT", ("Perp" if is_perp else "Spot")
+    return None, None, None
+
+
 def fetch_okx():
     out = []
-    spot = _get("https://www.okx.com/api/v5/public/instruments?instType=SPOT").get("data", [])
-    for x in spot:
-        if x.get("state") == "live" and x.get("baseCcy") and x.get("quoteCcy"):
-            out.append(_row("OKX", x["baseCcy"], x["quoteCcy"], "Spot", _to_ms(x.get("listTime"))))
-    swap = _get("https://www.okx.com/api/v5/public/instruments?instType=SWAP").get("data", [])
-    for x in swap:
-        if x.get("state") != "live":
-            continue
-        parts = (x.get("instId") or "").split("-")
-        if len(parts) >= 2:
-            out.append(_row("OKX", parts[0], parts[1], "Perp", _to_ms(x.get("listTime"))))
+    for page in range(1, ANN_PAGES + 1):
+        url = f"https://www.okx.com/en-au/help/section/announcements-new-listings?page={page}"
+        try:
+            resp = requests.get(url, headers=HTML_HEADERS, timeout=20)
+            body = resp.text
+        except Exception:
+            break
+        text = re.sub(r"<[^>]+>", " ", body)
+        pat = re.compile(
+            r"(OKX (?:to|will)[^<]{5,120}?)\s*Published on\s+(\d{1,2}\s+\w+\s+\d{4})",
+            re.I,
+        )
+        for title, dtxt in pat.findall(text):
+            if re.search(r"delist", title, re.I):
+                continue
+            base, quote, cat = _okx_parse_title(html.unescape(title))
+            if not base:
+                continue
+            try:
+                d = datetime.strptime(dtxt.strip(), "%d %B %Y")
+                ms = int(d.replace(tzinfo=timezone.utc).timestamp() * 1000)
+            except ValueError:
+                ms = None
+            out.append(_row("OKX", base, quote, cat, ms))
     return out
+
+
+def _kucoin_parse_title(title):
+    t = title
+    is_perp = bool(re.search(r"futures|perpetual|perp", t, re.I))
+    if is_perp:
+        m = re.search(r"\b([A-Z0-9]{2,12}?)(USDT|USDC|USD)\b", t)
+        if m:
+            return m.group(1), m.group(2), "Perp"
+        return None, None, None
+    m = re.search(r"\(([A-Z0-9]{2,12})\)", t)
+    if m:
+        return m.group(1), "USDT", "Spot"
+    return None, None, None
 
 
 def fetch_kucoin():
     out = []
-    spot = _get("https://api.kucoin.com/api/v1/symbols").get("data", [])
-    for x in spot:
-        if x.get("enableTrading") and x.get("baseCurrency") and x.get("quoteCurrency"):
-            out.append(_row("KuCoin", x["baseCurrency"], x["quoteCurrency"], "Spot", _to_ms(x.get("tradingStartTime"))))
-    fut = _get("https://api-futures.kucoin.com/api/v1/contracts/active").get("data", [])
-    for x in fut:
-        if x.get("status") == "Open" and x.get("baseCurrency") and x.get("quoteCurrency"):
-            base = "BTC" if x["baseCurrency"] == "XBT" else x["baseCurrency"]
-            fut_ts = _to_ms(x.get("firstOpenDate"))
-            out.append(_row("KuCoin", base, x["quoteCurrency"], "Perp", fut_ts))
-    return out
-
-
-def fetch_coinspot():
-    prices = _get("https://www.coinspot.com.au/pubapi/v2/latest").get("prices", {})
-    return [_row("CoinSpot", s.upper(), "AUD", "Spot", None) for s in prices.keys()]
-
-
-def fetch_swyftx():
-    data = _get("https://api.swyftx.com.au/markets/assets/")
-    if isinstance(data, dict):
-        data = data.get("data", [])
-    out = []
-    for a in data:
-        code = a.get("code")
-        if a.get("tradable") and code and code != "AUD":
-            out.append(_row("Swyftx", code, "AUD", "Spot", None))
+    for page in range(1, ANN_PAGES + 1):
+        url = ("https://www.kucoin.com/_api/cms/articles?category=new-listings"
+               f"&lang=en_US&page={page}&pageSize=15")
+        try:
+            data = requests.get(url, headers=HEADERS, timeout=20).json()
+        except Exception:
+            break
+        items = data.get("items", []) if isinstance(data, dict) else []
+        if not items:
+            break
+        for it in items:
+            title = it.get("title") or ""
+            base, quote, cat = _kucoin_parse_title(title)
+            if not base:
+                continue
+            out.append(_row("KuCoin", base, quote, cat, _to_ms(it.get("publish_ts"))))
     return out
 
 
@@ -214,7 +266,7 @@ FETCHERS = {
 }
 
 
-@st.cache_data(ttl=120, show_spinner=True)
+@st.cache_data(ttl=300, show_spinner=True)
 def load_all():
     rows, errors = [], {}
     for name, fn in FETCHERS.items():
@@ -224,18 +276,17 @@ def load_all():
             errors[name] = str(e)
     df = pd.DataFrame(rows)
     if not df.empty:
-        df = df.drop_duplicates(subset=["exchange", "pair", "category"])
         df["listed_date"] = df["list_ts"].apply(
             lambda t: _as_date(datetime.fromtimestamp(t / 1000, tz=timezone.utc))
             if pd.notna(t) and t else None
         )
+        df = df.sort_values("listed_date", na_position="last")
+        df = df.drop_duplicates(subset=["exchange", "pair", "category"], keep="first")
     return df, errors
 
 
 def record_snapshot(df):
-    """Persistent-first tracking with session fallback."""
     persistent_seen, sha = load_persistent_snapshot()
-
     if persistent_seen is not None:
         seen = dict(persistent_seen)
         first_run = len(seen) == 0
@@ -249,7 +300,6 @@ def record_snapshot(df):
         if changed:
             save_persistent_snapshot(seen, sha)
         return seen, True
-
     first_run = "first_seen" not in st.session_state
     if first_run:
         st.session_state.first_seen = {}
@@ -315,7 +365,7 @@ def build_dashboard():
             alt = not alt
             bg = "#d9d9d9" if alt else "#ffffff"
             tokens = win.get((ex_key, t), [])
-            tokens_txt = ", ".join(sorted(tokens)) if tokens else "-"
+            tokens_txt = ", ".join(sorted(set(tokens))) if tokens else "-"
             ex_cell = f"<b>{html.escape(ex_label)}</b>" if i == 0 else ""
             color = TYPE_COLOR.get(t, "#333")
             rows_html.append(
@@ -337,27 +387,25 @@ def build_dashboard():
     st.markdown(table_html, unsafe_allow_html=True)
 
     st.info(
-        "Note: OKX and KuCoin do not publish a separate Australia-only product feed, "
-        "so these rows reflect each exchange's global catalogue (the AU entities offer a "
-        "subset). OKX and KuCoin listing dates are real (from their APIs). CoinSpot and "
-        "Swyftx are Australian exchanges."
+        "Sources: OKX rows come from the OKX Australia new-listings announcements "
+        "(okx.com/en-au). KuCoin has no separate Australian site, so KuCoin rows use "
+        "KuCoin's global new-listings feed. CoinSpot and Swyftx are Australian exchanges "
+        "(AUD). Coinbase and Kraken are global spot catalogues."
     )
 
     if persistent:
         st.caption(
-            "\u2705 Persistent tracking active. New listings are recorded durably and "
-            "survive app restarts. OKX and KuCoin show real listing dates; Coinbase, "
-            "Kraken, CoinSpot and Swyftx do not publish listing dates, so a new pair is "
-            "flagged the first date it appears after the baseline. 'Convert' has no public "
-            "listed pairs. Perpetuals are available on OKX & KuCoin only."
+            "\u2705 Persistent tracking active. OKX Australia and KuCoin show real listing "
+            "dates parsed from their announcements; Coinbase, Kraken, CoinSpot and Swyftx "
+            "do not publish listing dates, so a pair is flagged the first date it appears "
+            "after the baseline. 'Convert' has no public listed pairs."
         )
     else:
         st.caption(
-            "New listings within the selected window. OKX and KuCoin show real listing "
-            "dates; the other exchanges show '-' until genuinely new pairs appear after "
-            "first load (baseline set on first run, resets if the app restarts \u2014 add a "
-            "GITHUB_TOKEN secret to enable persistent tracking). 'Convert' has no public "
-            "listed pairs. Perpetuals are available on OKX & KuCoin only."
+            "New listings within the selected window. OKX Australia and KuCoin show real "
+            "listing dates from announcements; the other exchanges show '-' until genuinely "
+            "new pairs appear after first load (resets on restart \u2014 add a GITHUB_TOKEN "
+            "secret for persistent tracking). 'Convert' has no public listed pairs."
         )
 
     with st.expander("Browse all pairs (full filterable table)"):
