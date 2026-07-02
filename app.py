@@ -39,13 +39,11 @@ SNAPSHOT_REPO = "Jasonunswl/token-listings-dashboard"
 SNAPSHOT_PATH = "snapshot.json"
 SNAPSHOT_BRANCH = "main"
 
-
 def _gh_token():
     try:
         return st.secrets.get("GITHUB_TOKEN")
     except Exception:
         return None
-
 
 def _gh_headers(token):
     return {
@@ -53,7 +51,6 @@ def _gh_headers(token):
         "Accept": "application/vnd.github+json",
         "User-Agent": "ListingsDashboard",
     }
-
 
 def load_persistent_snapshot():
     token = _gh_token()
@@ -76,7 +73,6 @@ def load_persistent_snapshot():
         return seen, payload.get("sha")
     except Exception:
         return None, None
-
 
 def save_persistent_snapshot(seen, sha):
     token = _gh_token()
@@ -102,10 +98,8 @@ def save_persistent_snapshot(seen, sha):
     except Exception:
         return False
 
-
 def _get(url):
     return requests.get(url, headers=HEADERS, timeout=20).json()
-
 
 def _as_date(v):
     if v is None:
@@ -122,7 +116,6 @@ def _as_date(v):
     except Exception:
         return None
 
-
 def _to_ms(v):
     try:
         n = int(v)
@@ -134,10 +127,8 @@ def _to_ms(v):
         n *= 1000
     return n
 
-
 def _date_to_ms(d):
     return int(d.replace(tzinfo=timezone.utc).timestamp() * 1000)
-
 
 def _iso_to_ms(s):
     if not s:
@@ -148,11 +139,9 @@ def _iso_to_ms(s):
     except Exception:
         return None
 
-
 def fetch_coinspot():
     prices = _get("https://www.coinspot.com.au/pubapi/v2/latest").get("prices", {})
     return [_row("CoinSpot", s.upper(), "AUD", "Spot", None) for s in prices.keys()]
-
 
 def fetch_swyftx():
     data = _get("https://api.swyftx.com.au/markets/assets/")
@@ -165,11 +154,12 @@ def fetch_swyftx():
             out.append(_row("Swyftx", code, "AUD", "Spot", None))
     return out
 
-
 def fetch_coinbase():
     """Coinbase Advanced Trade market products carry real listing dates via the
     'new_at' field (and a 'new' flag). Legacy assets share a backfilled floor
-    timestamp, which we treat as undated."""
+    timestamp, which we treat as undated. Perpetual futures come from Coinbase
+    International Exchange, which has no listing-date field, so those are dated
+    by day-over-day snapshot detection (like CoinSpot/Swyftx)."""
     out = []
     try:
         data = _get("https://api.coinbase.com/api/v3/brokerage/market/products?limit=1000")
@@ -186,6 +176,23 @@ def fetch_coinbase():
         new_at = p.get("new_at") or ""
         ms = None if (not new_at or new_at.startswith(COINBASE_FLOOR)) else _iso_to_ms(new_at)
         out.append(_row("Coinbase", base, quote, cat, ms))
+    # Perpetual futures from Coinbase International Exchange. This endpoint has no
+    # listing-date field, so perps are undated and picked up by snapshot detection.
+    try:
+        instruments = _get("https://api.international.coinbase.com/api/v1/instruments")
+        if isinstance(instruments, dict):
+            instruments = instruments.get("instruments", [])
+        for inst in instruments or []:
+            itype = (inst.get("type") or inst.get("instrument_type") or "").upper()
+            sym = inst.get("symbol") or ""
+            if "PERP" not in itype and "PERP" not in sym:
+                continue
+            base = inst.get("base_asset_name") or (sym.split("-")[0] if sym else None)
+            if not base:
+                continue
+            out.append(_row("Coinbase", base, "PERP", "Perp", None))
+    except Exception:
+        pass
     # Fallback to the Exchange catalogue if the Advanced Trade endpoint is unavailable.
     if not out:
         try:
@@ -197,14 +204,12 @@ def fetch_coinbase():
             pass
     return out
 
-
 def _parse_written_date(txt):
     txt = re.sub(r"(\d{1,2})(st|nd|rd|th)", r"\1", txt).strip().rstrip(",")
     try:
         return datetime.strptime(txt.replace(",", ""), "%B %d %Y")
     except ValueError:
         return None
-
 
 def fetch_kraken():
     """Kraken listings with real dates from the Asset Listings announcements,
@@ -247,7 +252,6 @@ def fetch_kraken():
         pass
     return out
 
-
 def _okx_parse_title(title):
     t = title
     is_perp = bool(re.search(r"perp|x-perp|perpetual|futures", t, re.I))
@@ -264,7 +268,6 @@ def _okx_parse_title(title):
     if m:
         return m.group(1), "USDT", ("Perp" if is_perp else "Spot")
     return None, None, None
-
 
 def fetch_okx():
     out = []
@@ -294,13 +297,11 @@ def fetch_okx():
             out.append(_row("OKX", base, quote, cat, ms))
     return out
 
-
 def fetch_kucoin():
     # KuCoin does not operate a separate Australian site (kucoin.com.au is unavailable).
     # Per the requirement to track AU listings only, we do NOT pull KuCoin's global feed.
     # KuCoin AU will show "-" until an AU-specific source becomes available.
     return []
-
 
 def _row(exchange, token, quote, category, list_ts):
     token, quote = str(token).upper(), str(quote).upper()
@@ -309,12 +310,10 @@ def _row(exchange, token, quote, category, list_ts):
         "pair": f"{token}/{quote}", "category": category, "list_ts": list_ts,
     }
 
-
 FETCHERS = {
     "Coinbase": fetch_coinbase, "Kraken": fetch_kraken, "OKX": fetch_okx,
     "KuCoin": fetch_kucoin, "CoinSpot": fetch_coinspot, "Swyftx": fetch_swyftx,
 }
-
 
 def _prefer_usd(df):
     """For each (exchange, token, category) group, if a USD-quoted pair exists,
@@ -333,7 +332,6 @@ def _prefer_usd(df):
             keep.append(g)
     result = pd.concat(keep, ignore_index=True)
     return result.drop(columns=["_is_usd"])
-
 
 @st.cache_data(ttl=300, show_spinner=True)
 def load_all():
@@ -354,7 +352,6 @@ def load_all():
         # Prefer XXX/USD over XXX/USDC and XXX/USDT for the same token.
         df = _prefer_usd(df)
     return df, errors
-
 
 def record_snapshot(df):
     persistent_seen, sha = load_persistent_snapshot()
@@ -382,7 +379,6 @@ def record_snapshot(df):
             seen[key] = stamp
     return seen, False
 
-
 def new_in_window(df, seen, start_d, end_d):
     result = {}
     for _, r in df.iterrows():
@@ -392,7 +388,6 @@ def new_in_window(df, seen, start_d, end_d):
         if ld is not None and ld != BASELINE_DATE and start_d <= ld <= end_d:
             result.setdefault((r["exchange"], r["category"]), []).append(r["pair"])
     return result
-
 
 def build_dashboard():
     st.title("💰 Token Listings Dashboard")
@@ -459,10 +454,12 @@ def build_dashboard():
 
     st.info(
         "Sources with real listing dates: OKX AU (okx.com/en-au announcements), "
-        "Kraken (blog.kraken.com Asset Listings), and Coinbase (Advanced Trade "
-        "'new_at' field). KuCoin has no separate Australian site, so KuCoin AU "
-        "shows '-'. CoinSpot and Swyftx are Australian exchanges (AUD) with no "
-        "published listing dates, so their new pairs are detected by day-over-day snapshot."
+        "Kraken (blog.kraken.com Asset Listings), and Coinbase Spot (Advanced Trade "
+        "'new_at' field). Coinbase Perp comes from Coinbase International Exchange, "
+        "which has no listing-date field, so perps are detected by day-over-day "
+        "snapshot. KuCoin has no separate Australian site, so KuCoin AU shows '-'. "
+        "CoinSpot and Swyftx are Australian exchanges (AUD) with no published listing "
+        "dates, so their new pairs are detected by day-over-day snapshot."
     )
 
     st.caption(
@@ -472,17 +469,17 @@ def build_dashboard():
 
     if persistent:
         st.caption(
-            "Persistent tracking active. OKX AU, Kraken and Coinbase show real listing "
-            "dates from their APIs/announcements; CoinSpot and Swyftx do not publish "
-            "listing dates, so a pair is flagged the first date it appears after the "
-            "baseline. 'Convert' has no public listed pairs."
+            "Persistent tracking active. OKX AU, Kraken and Coinbase Spot show real "
+            "listing dates from their APIs/announcements; Coinbase Perp, CoinSpot and "
+            "Swyftx do not publish listing dates, so a pair is flagged the first date "
+            "it appears after the baseline. 'Convert' has no public listed pairs."
         )
     else:
         st.caption(
-            "New listings within the selected window. OKX AU, Kraken and Coinbase show "
-            "real listing dates; CoinSpot and Swyftx show '-' until genuinely new pairs "
-            "appear after first load (resets on restart - add a GITHUB_TOKEN secret for "
-            "persistent tracking). 'Convert' has no public listed pairs."
+            "New listings within the selected window. OKX AU, Kraken and Coinbase Spot "
+            "show real listing dates; Coinbase Perp, CoinSpot and Swyftx show '-' until "
+            "genuinely new pairs appear after first load (resets on restart - add a "
+            "GITHUB_TOKEN secret for persistent tracking). 'Convert' has no public listed pairs."
         )
 
     with st.expander("Browse all pairs (full filterable table)"):
@@ -493,6 +490,5 @@ def build_dashboard():
                              "quote": "Quote", "category": "Category", "listed": "Listed"}),
             use_container_width=True, hide_index=True, height=400,
         )
-
 
 build_dashboard()
