@@ -31,6 +31,8 @@ EXCHANGE_DISPLAY = {
 }
 TYPE_COLOR = {"Convert": "#9c27b0", "Spot": "#4caf50", "Perp": "#e08a2e"}
 BASELINE_DATE = date(2000, 1, 1)
+# Coinbase backfilled a floor timestamp on legacy assets; ignore it as "not a real listing date".
+COINBASE_FLOOR = "2023-01-01"
 ANN_PAGES = 4
 
 SNAPSHOT_REPO = "Jasonunswl/token-listings-dashboard"
@@ -137,6 +139,16 @@ def _date_to_ms(d):
     return int(d.replace(tzinfo=timezone.utc).timestamp() * 1000)
 
 
+def _iso_to_ms(s):
+    if not s:
+        return None
+    try:
+        d = datetime.fromisoformat(s.replace("Z", "+00:00"))
+        return int(d.timestamp() * 1000)
+    except Exception:
+        return None
+
+
 def fetch_coinspot():
     prices = _get("https://www.coinspot.com.au/pubapi/v2/latest").get("prices", {})
     return [_row("CoinSpot", s.upper(), "AUD", "Spot", None) for s in prices.keys()]
@@ -155,32 +167,50 @@ def fetch_swyftx():
 
 
 def fetch_coinbase():
-    data = _get("https://api.exchange.coinbase.com/products")
+    """Coinbase Advanced Trade market products carry real listing dates via the
+    'new_at' field (and a 'new' flag). Legacy assets share a backfilled floor
+    timestamp, which we treat as undated."""
     out = []
-    for p in data:
-        if p.get("status") == "online" and p.get("base_currency") and p.get("quote_currency"):
-            out.append(_row("Coinbase", p["base_currency"], p["quote_currency"], "Spot", None))
+    try:
+        data = _get("https://api.coinbase.com/api/v3/brokerage/market/products?limit=1000")
+        products = data.get("products", []) if isinstance(data, dict) else []
+    except Exception:
+        products = []
+    for p in products:
+        base = p.get("base_currency_id") or p.get("base_display_symbol")
+        quote = p.get("quote_currency_id") or p.get("quote_display_symbol")
+        if not base or not quote:
+            continue
+        ptype = (p.get("product_type") or "").upper()
+        cat = "Perp" if ("FUTURE" in ptype or "PERP" in ptype) else "Spot"
+        new_at = p.get("new_at") or ""
+        ms = None if (not new_at or new_at.startswith(COINBASE_FLOOR)) else _iso_to_ms(new_at)
+        out.append(_row("Coinbase", base, quote, cat, ms))
+    # Fallback to the Exchange catalogue if the Advanced Trade endpoint is unavailable.
+    if not out:
+        try:
+            data = _get("https://api.exchange.coinbase.com/products")
+            for p in data:
+                if p.get("status") == "online" and p.get("base_currency") and p.get("quote_currency"):
+                    out.append(_row("Coinbase", p["base_currency"], p["quote_currency"], "Spot", None))
+        except Exception:
+            pass
     return out
 
 
 def _parse_written_date(txt):
     txt = re.sub(r"(\d{1,2})(st|nd|rd|th)", r"\1", txt).strip().rstrip(",")
-    for fmt in ("%B %d %Y", "%B %d, %Y"):
-        try:
-            return datetime.strptime(txt.replace(",", ""), "%B %d %Y")
-        except ValueError:
-            continue
-    return None
+    try:
+        return datetime.strptime(txt.replace(",", ""), "%B %d %Y")
+    except ValueError:
+        return None
 
 
 def fetch_kraken():
     """Kraken listings with real dates from the Asset Listings announcements,
-    merged with the full trading catalogue (catalogue rows have no date and are
-    used mainly for the browse-all table / snapshot detection)."""
+    merged with the full trading catalogue for the browse-all table."""
     out = []
     seen_pairs = set()
-
-    # 1) Dated announcements: "TOKEN is available for trading!" + published date.
     try:
         resp = requests.get(
             "https://blog.kraken.com/category/product/asset-listings",
@@ -204,8 +234,6 @@ def fetch_kraken():
             seen_pairs.add(tok)
     except Exception:
         pass
-
-    # 2) Full catalogue (no dates) for completeness in the browse table.
     try:
         data = _get("https://api.kraken.com/0/public/AssetPairs").get("result", {})
         for p in data.values():
@@ -409,25 +437,24 @@ def build_dashboard():
     st.markdown(table_html, unsafe_allow_html=True)
 
     st.info(
-        "Sources: OKX AU rows come from the OKX Australia new-listings announcements "
-        "(okx.com/en-au). Kraken rows use real dates from Kraken's Asset Listings "
-        "announcements (blog.kraken.com). KuCoin has no separate Australian site, so "
-        "KuCoin AU shows '-'. CoinSpot and Swyftx are Australian exchanges (AUD). "
-        "Coinbase publishes no dated listing feed, so its new pairs are detected by "
-        "day-over-day snapshot."
+        "Sources with real listing dates: OKX AU (okx.com/en-au announcements), "
+        "Kraken (blog.kraken.com Asset Listings), and Coinbase (Advanced Trade "
+        "'new_at' field). KuCoin has no separate Australian site, so KuCoin AU "
+        "shows '-'. CoinSpot and Swyftx are Australian exchanges (AUD) with no "
+        "published listing dates, so their new pairs are detected by day-over-day snapshot."
     )
 
     if persistent:
         st.caption(
-            "Persistent tracking active. OKX AU and Kraken show real listing dates parsed "
-            "from their announcements; Coinbase, CoinSpot and Swyftx do not publish listing "
-            "dates, so a pair is flagged the first date it appears after the baseline. "
-            "'Convert' has no public listed pairs."
+            "Persistent tracking active. OKX AU, Kraken and Coinbase show real listing "
+            "dates from their APIs/announcements; CoinSpot and Swyftx do not publish "
+            "listing dates, so a pair is flagged the first date it appears after the "
+            "baseline. 'Convert' has no public listed pairs."
         )
     else:
         st.caption(
-            "New listings within the selected window. OKX AU and Kraken show real listing "
-            "dates from announcements; the other exchanges show '-' until genuinely new pairs "
+            "New listings within the selected window. OKX AU, Kraken and Coinbase show "
+            "real listing dates; CoinSpot and Swyftx show '-' until genuinely new pairs "
             "appear after first load (resets on restart - add a GITHUB_TOKEN secret for "
             "persistent tracking). 'Convert' has no public listed pairs."
         )
