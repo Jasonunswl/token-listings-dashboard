@@ -316,6 +316,25 @@ FETCHERS = {
 }
 
 
+def _prefer_usd(df):
+    """For each (exchange, token, category) group, if a USD-quoted pair exists,
+    keep only the USD one and drop USDC/USDT (and other) duplicates. If no USD
+    pair exists, keep whatever pairs are present."""
+    if df.empty:
+        return df
+    df = df.copy()
+    df["_is_usd"] = df["quote"] == "USD"
+    keep = []
+    grouped = df.groupby(["exchange", "token", "category"], sort=False)
+    for _, g in grouped:
+        if g["_is_usd"].any():
+            keep.append(g[g["_is_usd"]])
+        else:
+            keep.append(g)
+    result = pd.concat(keep, ignore_index=True)
+    return result.drop(columns=["_is_usd"])
+
+
 @st.cache_data(ttl=300, show_spinner=True)
 def load_all():
     rows, errors = [], {}
@@ -332,6 +351,8 @@ def load_all():
         )
         df = df.sort_values("listed_date", na_position="last")
         df = df.drop_duplicates(subset=["exchange", "pair", "category"], keep="first")
+        # Prefer XXX/USD over XXX/USDC and XXX/USDT for the same token.
+        df = _prefer_usd(df)
     return df, errors
 
 
@@ -442,6 +463,11 @@ def build_dashboard():
         "'new_at' field). KuCoin has no separate Australian site, so KuCoin AU "
         "shows '-'. CoinSpot and Swyftx are Australian exchanges (AUD) with no "
         "published listing dates, so their new pairs are detected by day-over-day snapshot."
+    )
+
+    st.caption(
+        "Pairs are de-duplicated per token: when a token lists in USD as well as "
+        "USDC/USDT, only the USD pair is shown."
     )
 
     if persistent:
