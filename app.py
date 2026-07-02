@@ -8,7 +8,7 @@ import pandas as pd
 import requests
 import streamlit as st
 
-st.set_page_config(page_title="New Token Listings", page_icon="🪙", layout="wide")
+st.set_page_config(page_title="New Token Listings", page_icon="\uD83E\uDE99", layout="wide")
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (compatible; ListingsDashboard/1.0)",
@@ -16,7 +16,7 @@ HEADERS = {
 }
 HTML_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                  "(KHTML, like Gecko) Chrome/120.0 Safari/537.36",
+    "(KHTML, like Gecko) Chrome/120.0 Safari/537.36",
     "Accept": "text/html,application/xhtml+xml",
     "Accept-Language": "en-AU,en;q=0.9",
 }
@@ -26,8 +26,8 @@ EXCHANGE_DISPLAY = {
     "Swyftx": "Swyftx",
     "Coinbase": "Coinbase",
     "Kraken": "Kraken",
-    "OKX": "OKX Australia",
-    "KuCoin": "KuCoin (Global)",
+    "OKX": "OKX AU",
+    "KuCoin": "KuCoin AU",
 }
 TYPE_COLOR = {"Convert": "#9c27b0", "Spot": "#4caf50", "Perp": "#e08a2e"}
 BASELINE_DATE = date(2000, 1, 1)
@@ -217,39 +217,11 @@ def fetch_okx():
     return out
 
 
-def _kucoin_parse_title(title):
-    t = title
-    is_perp = bool(re.search(r"futures|perpetual|perp", t, re.I))
-    if is_perp:
-        m = re.search(r"\b([A-Z0-9]{2,12}?)(USDT|USDC|USD)\b", t)
-        if m:
-            return m.group(1), m.group(2), "Perp"
-        return None, None, None
-    m = re.search(r"\(([A-Z0-9]{2,12})\)", t)
-    if m:
-        return m.group(1), "USDT", "Spot"
-    return None, None, None
-
-
 def fetch_kucoin():
-    out = []
-    for page in range(1, ANN_PAGES + 1):
-        url = ("https://www.kucoin.com/_api/cms/articles?category=new-listings"
-               f"&lang=en_US&page={page}&pageSize=15")
-        try:
-            data = requests.get(url, headers=HEADERS, timeout=20).json()
-        except Exception:
-            break
-        items = data.get("items", []) if isinstance(data, dict) else []
-        if not items:
-            break
-        for it in items:
-            title = it.get("title") or ""
-            base, quote, cat = _kucoin_parse_title(title)
-            if not base:
-                continue
-            out.append(_row("KuCoin", base, quote, cat, _to_ms(it.get("publish_ts"))))
-    return out
+    # KuCoin does not operate a separate Australian site (kucoin.com.au is unavailable).
+    # Per the requirement to track AU listings only, we do NOT pull KuCoin's global feed.
+    # KuCoin AU will show "-" until an AU-specific source becomes available.
+    return []
 
 
 def _row(exchange, token, quote, category, list_ts):
@@ -324,7 +296,7 @@ def new_in_window(df, seen, start_d, end_d):
 
 
 def build_dashboard():
-    st.title("🪙 Token Listings Dashboard")
+    st.title("\uD83E\uDE99 Token Listings Dashboard")
 
     df, errors = load_all()
     if errors:
@@ -342,7 +314,7 @@ def build_dashboard():
         end_d = st.date_input("To", value=date.today(), key="to_d")
     with c3:
         st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
-        if st.button("🔄 Refresh", key="refresh_btn"):
+        if st.button("\uD83D\uDD04 Refresh", key="refresh_btn"):
             st.cache_data.clear()
             st.rerun()
 
@@ -387,25 +359,25 @@ def build_dashboard():
     st.markdown(table_html, unsafe_allow_html=True)
 
     st.info(
-        "Sources: OKX rows come from the OKX Australia new-listings announcements "
-        "(okx.com/en-au). KuCoin has no separate Australian site, so KuCoin rows use "
-        "KuCoin's global new-listings feed. CoinSpot and Swyftx are Australian exchanges "
-        "(AUD). Coinbase and Kraken are global spot catalogues."
+        "Sources: OKX AU rows come from the OKX Australia new-listings announcements "
+        "(okx.com/en-au). KuCoin does not operate a separate Australian site, so KuCoin AU "
+        "shows '-' (no AU-specific source is available). CoinSpot and Swyftx are Australian "
+        "exchanges (AUD). Coinbase and Kraken are global spot catalogues."
     )
 
     if persistent:
         st.caption(
-            "\u2705 Persistent tracking active. OKX Australia and KuCoin show real listing "
-            "dates parsed from their announcements; Coinbase, Kraken, CoinSpot and Swyftx "
-            "do not publish listing dates, so a pair is flagged the first date it appears "
-            "after the baseline. 'Convert' has no public listed pairs."
+            "\u2705 Persistent tracking active. OKX AU shows real listing dates parsed from "
+            "its announcements; Coinbase, Kraken, CoinSpot and Swyftx do not publish listing "
+            "dates, so a pair is flagged the first date it appears after the baseline. "
+            "'Convert' has no public listed pairs."
         )
     else:
         st.caption(
-            "New listings within the selected window. OKX Australia and KuCoin show real "
-            "listing dates from announcements; the other exchanges show '-' until genuinely "
-            "new pairs appear after first load (resets on restart \u2014 add a GITHUB_TOKEN "
-            "secret for persistent tracking). 'Convert' has no public listed pairs."
+            "New listings within the selected window. OKX AU shows real listing dates from "
+            "announcements; the other exchanges show '-' until genuinely new pairs appear "
+            "after first load (resets on restart \u2014 add a GITHUB_TOKEN secret for "
+            "persistent tracking). 'Convert' has no public listed pairs."
         )
 
     with st.expander("Browse all pairs (full filterable table)"):
