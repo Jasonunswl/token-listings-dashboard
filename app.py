@@ -8,7 +8,7 @@ import pandas as pd
 import requests
 import streamlit as st
 
-st.set_page_config(page_title="New Token Listings", page_icon="\uD83E\uDE99", layout="wide")
+st.set_page_config(page_title="New Token Listings", page_icon=":coin:", layout="wide")
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (compatible; ListingsDashboard/1.0)",
@@ -296,7 +296,7 @@ def new_in_window(df, seen, start_d, end_d):
 
 
 def build_dashboard():
-    st.title("\uD83E\uDE99 Token Listings Dashboard")
+    st.title(":coin: Token Listings Dashboard")
 
     df, errors = load_all()
     if errors:
@@ -314,7 +314,7 @@ def build_dashboard():
         end_d = st.date_input("To", value=date.today(), key="to_d")
     with c3:
         st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
-        if st.button("\uD83D\uDD04 Refresh", key="refresh_btn"):
+        if st.button(":arrows_counterclockwise: Refresh", key="refresh_btn"):
             st.cache_data.clear()
             st.rerun()
 
@@ -367,7 +367,7 @@ def build_dashboard():
 
     if persistent:
         st.caption(
-            "\u2705 Persistent tracking active. OKX AU shows real listing dates parsed from "
+            "Persistent tracking active. OKX AU shows real listing dates parsed from "
             "its announcements; Coinbase, Kraken, CoinSpot and Swyftx do not publish listing "
             "dates, so a pair is flagged the first date it appears after the baseline. "
             "'Convert' has no public listed pairs."
@@ -376,7 +376,7 @@ def build_dashboard():
         st.caption(
             "New listings within the selected window. OKX AU shows real listing dates from "
             "announcements; the other exchanges show '-' until genuinely new pairs appear "
-            "after first load (resets on restart \u2014 add a GITHUB_TOKEN secret for "
+            "after first load (resets on restart - add a GITHUB_TOKEN secret for "
             "persistent tracking). 'Convert' has no public listed pairs."
         )
 
