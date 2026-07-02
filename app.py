@@ -7,7 +7,7 @@ import pandas as pd
 import requests
 import streamlit as st
 
-st.set_page_config(page_title="New Token Listings", page_icon="\u{1FA99}", layout="wide")
+st.set_page_config(page_title="New Token Listings", page_icon="🪙", layout="wide")
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (compatible; ListingsDashboard/1.0)",
@@ -220,16 +220,10 @@ def load_all():
 
 
 def record_snapshot(df):
-    """Persistent-first tracking with session fallback.
-
-    Returns (seen, persistent) where persistent indicates durable storage
-    is active. When persistent, new pairs are stamped with today's date and
-    written back to the repo so detection survives app restarts.
-    """
+    """Persistent-first tracking with session fallback."""
     persistent_seen, sha = load_persistent_snapshot()
 
     if persistent_seen is not None:
-        # Durable mode via GitHub snapshot.json
         seen = dict(persistent_seen)
         first_run = len(seen) == 0
         stamp = BASELINE_DATE if first_run else date.today()
@@ -243,7 +237,6 @@ def record_snapshot(df):
             save_persistent_snapshot(seen, sha)
         return seen, True
 
-    # Session-only fallback (resets on restart)
     first_run = "first_seen" not in st.session_state
     if first_run:
         st.session_state.first_seen = {}
@@ -268,7 +261,7 @@ def new_in_window(df, seen, start_d, end_d):
 
 
 def build_dashboard():
-    st.title("\u{1FA99} Token Listings Dashboard")
+    st.title("🪙 Token Listings Dashboard")
 
     df, errors = load_all()
     if errors:
@@ -286,7 +279,7 @@ def build_dashboard():
         end_d = st.date_input("To", value=date.today(), key="to_d")
     with c3:
         st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
-        if st.button("\u{1F504} Refresh", key="refresh_btn"):
+        if st.button("🔄 Refresh", key="refresh_btn"):
             st.cache_data.clear()
             st.rerun()
 
