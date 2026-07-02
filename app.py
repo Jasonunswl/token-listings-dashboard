@@ -253,21 +253,38 @@ def fetch_kraken():
     return out
 
 def _okx_parse_title(title):
-    t = title
-    is_perp = bool(re.search(r"perp|x-perp|perpetual|futures", t, re.I))
-    m = re.search(r"([A-Z0-9]{2,15})\s*/\s*([A-Z0-9]{2,6})", t)
-    if m:
-        quote = m.group(2)
+    """Return a list of (base, quote, category) tuples for an OKX announcement
+    title. A single announcement can list several tokens (e.g. 'ACTUSD and
+    AAVEUSD' or 'RESOLVUSD, BICOUSD, TRUMPUSD and LITUSD'), so we extract them
+    all. Non-listing announcements (delist/migration/etc.) return an empty list."""
+    if re.search(r"delist|migrat|suspen|maintenance|complet", title, re.I):
+        return []
+    is_perp = bool(re.search(r"perp|x-perp|perpetual|futures", title, re.I))
+    cat = "Perp" if is_perp else "Spot"
+    results = []
+    seen = set()
+
+    def add(tok, quote):
+        tok = tok.upper()
+        quote = quote.upper()
         if quote.startswith("USD") and quote not in ("USDT", "USDC"):
             quote = "USD"
-        return m.group(1), quote, ("Perp" if is_perp else "Spot")
-    m = re.search(r"\b([A-Z0-9]{2,12}?)(USDT|USDC|USD|EUR|BTC|ETH)\b", t)
-    if m:
-        return m.group(1), m.group(2), ("Perp" if is_perp else "Spot")
-    m = re.search(r"for\s+([A-Z0-9]{2,12})\s+crypto", t)
-    if m:
-        return m.group(1), "USDT", ("Perp" if is_perp else "Spot")
-    return None, None, None
+        key = (tok, quote)
+        if key not in seen:
+            seen.add(key)
+            results.append((tok, quote, cat))
+
+    # 1) explicit PAIR form, e.g. DATA/USD, TAO/USDT, CARDS/USDT
+    for m in re.finditer(r"([A-Z0-9]{2,15})\s*/\s*(USDT|USDC|USD|EUR|BTC|ETH)", title):
+        add(m.group(1), m.group(2))
+    # 2) concatenated TOKENUSD forms, e.g. AIUSD, ACTUSD, AAVEUSD, RESOLVUSD, BICOUSD
+    for m in re.finditer(r"\b([A-Z0-9]{2,12}?)(USDT|USDC|USD)\b", title):
+        add(m.group(1), m.group(2))
+    # 3) 'for X crypto' perp form, e.g. HYPE crypto, NES crypto
+    if not results:
+        for m in re.finditer(r"for\s+([A-Z0-9]{2,12})\s+crypto", title):
+            add(m.group(1), "USD")
+    return results
 
 def fetch_okx():
     out = []
@@ -284,17 +301,14 @@ def fetch_okx():
             re.I,
         )
         for title, dtxt in pat.findall(text):
-            if re.search(r"delist", title, re.I):
-                continue
-            base, quote, cat = _okx_parse_title(html.unescape(title))
-            if not base:
-                continue
+            title = html.unescape(title)
             try:
                 d = datetime.strptime(dtxt.strip(), "%d %B %Y")
                 ms = _date_to_ms(d)
             except ValueError:
                 ms = None
-            out.append(_row("OKX", base, quote, cat, ms))
+            for base, quote, cat in _okx_parse_title(title):
+                out.append(_row("OKX", base, quote, cat, ms))
     return out
 
 def fetch_kucoin():
