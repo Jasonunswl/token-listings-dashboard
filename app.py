@@ -19,8 +19,8 @@ EXCHANGE_DISPLAY = {
     "Swyftx": "Swyftx",
     "Coinbase": "Coinbase",
     "Kraken": "Kraken",
-    "OKX": "OKX AU",
-    "KuCoin": "Kucoin AU",
+    "OKX": "OKX (Global)",
+    "KuCoin": "KuCoin (Global)",
 }
 TYPE_COLOR = {"Convert": "#9c27b0", "Spot": "#4caf50", "Perp": "#e08a2e"}
 BASELINE_DATE = date(2000, 1, 1)
@@ -118,6 +118,20 @@ def _as_date(v):
         return None
 
 
+def _to_ms(v):
+    """Coerce an epoch value to milliseconds, or None. Handles s / ms."""
+    try:
+        n = int(v)
+    except (TypeError, ValueError):
+        return None
+    if n <= 0:
+        return None
+    # Values below ~1e12 are seconds; scale to ms.
+    if n < 1_000_000_000_000:
+        n *= 1000
+    return n
+
+
 def fetch_coinbase():
     data = _get("https://api.exchange.coinbase.com/products")
     out = []
@@ -143,16 +157,14 @@ def fetch_okx():
     spot = _get("https://www.okx.com/api/v5/public/instruments?instType=SPOT").get("data", [])
     for x in spot:
         if x.get("state") == "live" and x.get("baseCcy") and x.get("quoteCcy"):
-            ts = int(x["listTime"]) if x.get("listTime") else None
-            out.append(_row("OKX", x["baseCcy"], x["quoteCcy"], "Spot", ts))
+            out.append(_row("OKX", x["baseCcy"], x["quoteCcy"], "Spot", _to_ms(x.get("listTime"))))
     swap = _get("https://www.okx.com/api/v5/public/instruments?instType=SWAP").get("data", [])
     for x in swap:
         if x.get("state") != "live":
             continue
         parts = (x.get("instId") or "").split("-")
         if len(parts) >= 2:
-            ts = int(x["listTime"]) if x.get("listTime") else None
-            out.append(_row("OKX", parts[0], parts[1], "Perp", ts))
+            out.append(_row("OKX", parts[0], parts[1], "Perp", _to_ms(x.get("listTime"))))
     return out
 
 
@@ -161,12 +173,13 @@ def fetch_kucoin():
     spot = _get("https://api.kucoin.com/api/v1/symbols").get("data", [])
     for x in spot:
         if x.get("enableTrading") and x.get("baseCurrency") and x.get("quoteCurrency"):
-            out.append(_row("KuCoin", x["baseCurrency"], x["quoteCurrency"], "Spot", None))
+            out.append(_row("KuCoin", x["baseCurrency"], x["quoteCurrency"], "Spot", _to_ms(x.get("tradingStartTime"))))
     fut = _get("https://api-futures.kucoin.com/api/v1/contracts/active").get("data", [])
     for x in fut:
         if x.get("status") == "Open" and x.get("baseCurrency") and x.get("quoteCurrency"):
             base = "BTC" if x["baseCurrency"] == "XBT" else x["baseCurrency"]
-            out.append(_row("KuCoin", base, x["quoteCurrency"], "Perp", None))
+            fut_ts = _to_ms(x.get("firstOpenDate"))
+            out.append(_row("KuCoin", base, x["quoteCurrency"], "Perp", fut_ts))
     return out
 
 
@@ -323,21 +336,28 @@ def build_dashboard():
     )
     st.markdown(table_html, unsafe_allow_html=True)
 
+    st.info(
+        "Note: OKX and KuCoin do not publish a separate Australia-only product feed, "
+        "so these rows reflect each exchange's global catalogue (the AU entities offer a "
+        "subset). OKX and KuCoin listing dates are real (from their APIs). CoinSpot and "
+        "Swyftx are Australian exchanges."
+    )
+
     if persistent:
         st.caption(
-            "\u2705 Persistent tracking active. New listings are recorded durably "
-            "and survive app restarts. OKX shows real listing dates immediately; "
-            "the other exchanges are flagged as new the first date a genuinely new "
-            "pair appears after the baseline. 'Convert' has no public listed pairs. "
-            "Perpetuals are available on OKX & KuCoin only."
+            "\u2705 Persistent tracking active. New listings are recorded durably and "
+            "survive app restarts. OKX and KuCoin show real listing dates; Coinbase, "
+            "Kraken, CoinSpot and Swyftx do not publish listing dates, so a new pair is "
+            "flagged the first date it appears after the baseline. 'Convert' has no public "
+            "listed pairs. Perpetuals are available on OKX & KuCoin only."
         )
     else:
         st.caption(
-            "New listings within the selected window. OKX shows real listing dates "
-            "immediately; the other exchanges show '-' until genuinely new pairs "
-            "appear after first load (baseline set on first run, resets if the app "
-            "restarts \u2014 add a GITHUB_TOKEN secret to enable persistent tracking). "
-            "'Convert' has no public listed pairs. Perpetuals are available on OKX & KuCoin only."
+            "New listings within the selected window. OKX and KuCoin show real listing "
+            "dates; the other exchanges show '-' until genuinely new pairs appear after "
+            "first load (baseline set on first run, resets if the app restarts \u2014 add a "
+            "GITHUB_TOKEN secret to enable persistent tracking). 'Convert' has no public "
+            "listed pairs. Perpetuals are available on OKX & KuCoin only."
         )
 
     with st.expander("Browse all pairs (full filterable table)"):
