@@ -8,7 +8,7 @@ import pandas as pd
 import requests
 import streamlit as st
 
-st.set_page_config(page_title="New Token Listings", page_icon="💰", layout="wide")
+st.set_page_config(page_title="New Token Listings", page_icon="ð°", layout="wide")
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (compatible; ListingsDashboard/1.0)",
@@ -254,13 +254,17 @@ def fetch_kraken():
 
 def _okx_parse_title(title):
     """Return a list of (base, quote, category) tuples for an OKX announcement
-    title. A single announcement can list several tokens (e.g. 'ACTUSD and
-    AAVEUSD' or 'RESOLVUSD, BICOUSD, TRUMPUSD and LITUSD'), so we extract them
-    all. Non-listing announcements (delist/migration/etc.) return an empty list."""
-    if re.search(r"delist|migrat|suspen|maintenance|complet", title, re.I):
+    title. OKX AU only surfaces genuine SPOT crypto listings: announcements of
+    the form 'OKX will launch XXX/USD(S) for spot trading'. All derivatives
+    news (X-Perp / Expiry X-Perp / perpetual futures, incl. equity perps) and
+    non-listing announcements (delist/migration/adjust/etc.) are ignored."""
+    if re.search(r"delist|migrat|suspen|maintenance|complet|adjust", title, re.I):
         return []
-    is_perp = bool(re.search(r"perp|x-perp|perpetual|futures", title, re.I))
-    cat = "Perp" if is_perp else "Spot"
+    if re.search(r"perp|x-perp|perpetual|futures|equit", title, re.I):
+        return []
+    if not re.search(r"spot trading", title, re.I):
+        return []
+
     results = []
     seen = set()
 
@@ -272,18 +276,14 @@ def _okx_parse_title(title):
         key = (tok, quote)
         if key not in seen:
             seen.add(key)
-            results.append((tok, quote, cat))
+            results.append((tok, quote, "Spot"))
 
-    # 1) explicit PAIR form, e.g. DATA/USD, TAO/USDT, CARDS/USDT
+    # explicit PAIR form, e.g. DATA/USD, TAO/USDT
     for m in re.finditer(r"([A-Z0-9]{2,15})\s*/\s*(USDT|USDC|USD|EUR|BTC|ETH)", title):
         add(m.group(1), m.group(2))
-    # 2) concatenated TOKENUSD forms, e.g. AIUSD, ACTUSD, AAVEUSD, RESOLVUSD, BICOUSD
+    # concatenated TOKENUSD forms, e.g. DATAUSD
     for m in re.finditer(r"\b([A-Z0-9]{2,12}?)(USDT|USDC|USD)\b", title):
         add(m.group(1), m.group(2))
-    # 3) 'for X crypto' perp form, e.g. HYPE crypto, NES crypto
-    if not results:
-        for m in re.finditer(r"for\s+([A-Z0-9]{2,12})\s+crypto", title):
-            add(m.group(1), "USD")
     return results
 
 def fetch_okx():
@@ -404,7 +404,7 @@ def new_in_window(df, seen, start_d, end_d):
     return result
 
 def build_dashboard():
-    st.title("💰 Token Listings Dashboard")
+    st.title("ð° Token Listings Dashboard")
 
     df, errors = load_all()
     if errors:
